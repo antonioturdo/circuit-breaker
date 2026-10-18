@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Zeusi\CircuitBreaker;
 
+use Zeusi\CircuitBreaker\Exception\InvalidArgumentException;
+
 /**
  * Circuit breaker protecting a single service.
  */
@@ -19,9 +21,23 @@ interface CircuitBreakerInterface
      */
     public function acquirePermission(): bool;
 
-    public function registerSuccess(): void;
+    /**
+     * Registers that the service answered.
+     *
+     * @param float|null $duration seconds the call took, for the opening rules deciding on durations
+     *
+     * @throws InvalidArgumentException if the duration is negative or not finite
+     */
+    public function registerSuccess(?float $duration = null): void;
 
-    public function registerFailure(): void;
+    /**
+     * Registers that the service did not answer, or answered with an error of its own.
+     *
+     * @param float|null $duration seconds the call took, for the opening rules deciding on durations
+     *
+     * @throws InvalidArgumentException if the duration is negative or not finite
+     */
+    public function registerFailure(?float $duration = null): void;
 
     public function getState(): State;
 }

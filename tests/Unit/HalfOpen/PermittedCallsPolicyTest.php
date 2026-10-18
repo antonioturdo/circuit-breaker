@@ -18,13 +18,13 @@ final class PermittedCallsPolicyTest extends TestCase
      */
     public static function policyProvider(): iterable
     {
-        yield 'single trial, first call' => [1, new PermissionRequest(500, static fn(): int => 1), new HalfOpenProgress(0, 0), true, false];
-        yield 'single trial, second call' => [1, new PermissionRequest(500, static fn(): int => 2), new HalfOpenProgress(0, 0), false, false];
-        yield 'single trial reported back' => [1, new PermissionRequest(500, static fn(): int => 2), new HalfOpenProgress(1, 0), false, true];
-        yield 'single trial lost' => [1, new PermissionRequest(60_000, static fn(): int => 5), new HalfOpenProgress(0, 0), false, false];
-        yield 'last permitted call' => [3, new PermissionRequest(2_000, static fn(): int => 3), new HalfOpenProgress(1, 1), true, false];
-        yield 'beyond the permitted calls' => [3, new PermissionRequest(2_000, static fn(): int => 4), new HalfOpenProgress(1, 1), false, false];
-        yield 'all permitted calls reported back' => [3, new PermissionRequest(2_000, static fn(): int => 4), new HalfOpenProgress(2, 1), false, true];
+        yield 'single trial, first call' => [1, new PermissionRequest(500, static fn(): int => 1), new HalfOpenProgress(0), true, false];
+        yield 'single trial, second call' => [1, new PermissionRequest(500, static fn(): int => 2), new HalfOpenProgress(0), false, false];
+        yield 'single trial reported back' => [1, new PermissionRequest(500, static fn(): int => 2), new HalfOpenProgress(1), false, true];
+        yield 'single trial lost' => [1, new PermissionRequest(60_000, static fn(): int => 5), new HalfOpenProgress(0), false, false];
+        yield 'last permitted call' => [3, new PermissionRequest(2_000, static fn(): int => 3), new HalfOpenProgress(2), true, false];
+        yield 'beyond the permitted calls' => [3, new PermissionRequest(2_000, static fn(): int => 4), new HalfOpenProgress(2), false, false];
+        yield 'all permitted calls reported back' => [3, new PermissionRequest(2_000, static fn(): int => 4), new HalfOpenProgress(3), false, true];
     }
 
     #[DataProvider('policyProvider')]
