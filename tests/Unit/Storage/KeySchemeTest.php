@@ -6,6 +6,7 @@ namespace Zeusi\CircuitBreaker\Tests\Unit\Storage;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Zeusi\CircuitBreaker\Counting\DurationBand;
 use Zeusi\CircuitBreaker\Outcome;
 use Zeusi\CircuitBreaker\State;
 use Zeusi\CircuitBreaker\Storage\CircuitState;
@@ -32,8 +33,10 @@ final class KeySchemeTest extends TestCase
 
         self::assertSame('cb:v1:{payments}:state', $keyScheme->getStateKey());
         self::assertSame($expectedPeriodPrefix . ':calls', $keyScheme->getHalfOpenCallsKey($state));
-        self::assertSame($expectedPeriodPrefix . ':s:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Success, 1_791_676_810));
-        self::assertSame($expectedPeriodPrefix . ':f:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Failure, 1_791_676_810));
+        self::assertSame($expectedPeriodPrefix . ':s:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Success, new DurationBand(null, null), 1_791_676_810));
+        self::assertSame($expectedPeriodPrefix . ':f0-1jk:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Failure, new DurationBand(0, 2_000), 1_791_676_810));
+        self::assertSame($expectedPeriodPrefix . ':s1jk-:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Success, new DurationBand(2_000, null), 1_791_676_810));
+        self::assertSame($expectedPeriodPrefix . ':srs-1jk:tmpuoa', $keyScheme->getOutcomeKey($state, Outcome::Success, new DurationBand(1_000, 2_000), 1_791_676_810));
     }
 
     public function testPeriodsOfDifferentStatesStartingTogetherAreApart(): void
@@ -42,6 +45,6 @@ final class KeySchemeTest extends TestCase
         $closed = new CircuitState(State::Closed, 1_791_676_800_000);
         $halfOpen = new CircuitState(State::HalfOpen, 1_791_676_800_000);
 
-        self::assertNotSame($keyScheme->getOutcomeKey($closed, Outcome::Failure, 1), $keyScheme->getOutcomeKey($halfOpen, Outcome::Failure, 1));
+        self::assertNotSame($keyScheme->getOutcomeKey($closed, Outcome::Failure, new DurationBand(null, null), 1), $keyScheme->getOutcomeKey($halfOpen, Outcome::Failure, new DurationBand(null, null), 1));
     }
 }

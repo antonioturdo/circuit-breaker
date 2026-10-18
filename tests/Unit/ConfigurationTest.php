@@ -10,29 +10,34 @@ use Zeusi\CircuitBreaker\Configuration;
 use Zeusi\CircuitBreaker\Exception\InvalidArgumentException;
 use Zeusi\CircuitBreaker\HalfOpen\HalfOpenPolicyInterface;
 use Zeusi\CircuitBreaker\HalfOpen\RampPolicy;
+use Zeusi\CircuitBreaker\Opening\FailureRateRule;
 
 final class ConfigurationTest extends TestCase
 {
     /**
-     * @return iterable<string, array{float, int, int, float}>
+     * @return iterable<string, array{float, list<mixed>, float}>
      */
     public static function invalidConfigurationProvider(): iterable
     {
-        yield 'time window below 10 seconds' => [9.999, 50, 10, 10];
-        yield 'time window above 1 hour' => [3600.001, 50, 10, 10];
-        yield 'failure rate threshold of 0' => [60, 0, 10, 10];
-        yield 'failure rate threshold above 100' => [60, 101, 10, 10];
-        yield 'minimum requests of 0' => [60, 50, 0, 10];
-        yield 'open duration below 1 second' => [60, 50, 10, 0.999];
-        yield 'open duration above 30 days' => [60, 50, 10, 2_592_000.001];
+        $openingRules = [new FailureRateRule(threshold: 50, minimumRequests: 10)];
+
+        yield 'time window below 10 seconds' => [9.999, $openingRules, 10];
+        yield 'time window above 1 hour' => [3600.001, $openingRules, 10];
+        yield 'no opening rule' => [60, [], 10];
+        yield 'opening rule of another type' => [60, [...$openingRules, 50], 10];
+        yield 'open duration below 1 second' => [60, $openingRules, 0.999];
+        yield 'open duration above 30 days' => [60, $openingRules, 2_592_000.001];
     }
 
+    /**
+     * @param list<mixed> $openingRules
+     */
     #[DataProvider('invalidConfigurationProvider')]
-    public function testInvalidConfiguration(float $timeWindow, int $failureRateThreshold, int $minimumRequests, float $openDuration): void
+    public function testInvalidConfiguration(float $timeWindow, array $openingRules, float $openDuration): void
     {
         $this->expectException(InvalidArgumentException::class);
 
-        new Configuration($timeWindow, $failureRateThreshold, $minimumRequests, $openDuration, RampPolicy::createExponential(60, 0.01));
+        new Configuration($timeWindow, $openingRules, $openDuration, RampPolicy::createExponential(60, 0.01));
     }
 
     /**
@@ -53,6 +58,6 @@ final class ConfigurationTest extends TestCase
 
         $this->expectException(InvalidArgumentException::class);
 
-        new Configuration(60, 50, 10, 10, $halfOpenPolicy);
+        new Configuration(60, [new FailureRateRule(threshold: 50, minimumRequests: 10)], 10, $halfOpenPolicy);
     }
 }

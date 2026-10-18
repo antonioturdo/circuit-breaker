@@ -9,6 +9,7 @@ use Zeusi\CircuitBreaker\CircuitBreaker;
 use Zeusi\CircuitBreaker\Configuration;
 use Zeusi\CircuitBreaker\Event\CircuitOpened;
 use Zeusi\CircuitBreaker\HalfOpen\RampPolicy;
+use Zeusi\CircuitBreaker\Opening\FailureRateRule;
 use Zeusi\CircuitBreaker\State;
 use Zeusi\CircuitBreaker\Storage\StorageInterface;
 
@@ -136,7 +137,7 @@ abstract class StorageContractTestCase extends TestCase
     public function testCircuitBreakerOpens(): void
     {
         // end to end: real keys, state encoding and transitions on the backend
-        $configuration = new Configuration(timeWindow: 60, failureRateThreshold: 50, minimumRequests: 10, openDuration: 10, halfOpenPolicy: RampPolicy::createExponential(60, 0.01));
+        $configuration = new Configuration(timeWindow: 60, openingRules: [new FailureRateRule(threshold: 50, minimumRequests: 10)], openDuration: 10, halfOpenPolicy: RampPolicy::createExponential(60, 0.01));
         $breaker = new CircuitBreaker('payments', $configuration, $this->storage);
         $other = new CircuitBreaker('other service', $configuration, $this->storage);
 
@@ -187,7 +188,7 @@ abstract class StorageContractTestCase extends TestCase
 
     public function testConcurrentFailuresOpenTheCircuitOnce(): void
     {
-        $configuration = new Configuration(timeWindow: 60, failureRateThreshold: 50, minimumRequests: 10, openDuration: 10, halfOpenPolicy: RampPolicy::createExponential(60, 0.01));
+        $configuration = new Configuration(timeWindow: 60, openingRules: [new FailureRateRule(threshold: 50, minimumRequests: 10)], openDuration: 10, halfOpenPolicy: RampPolicy::createExponential(60, 0.01));
         $breaker = new CircuitBreaker('payments', $configuration, $this->storage);
 
         for ($i = 0; $i < 9; $i++) {

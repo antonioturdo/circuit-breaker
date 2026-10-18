@@ -1,11 +1,12 @@
 {
     "name": "zeusi/circuit-breaker",
-    "description": "A circuit breaker for PHP with bucketed sliding windows and configurable half-open policies, sharing its state through APCu, Redis or Memcached",
+    "description": "A circuit breaker for PHP with combinable opening rules on failed and slow calls, configurable half-open policies, and state shared through APCu, Redis or Memcached",
     "keywords": [
         "circuit-breaker",
         "fault-tolerance",
         "resilience",
         "sliding-window",
+        "slow-calls",
         "half-open",
         "apcu",
         "redis",

@@ -50,7 +50,7 @@ final class PermittedCallsPolicy implements HalfOpenPolicyInterface
 
     public function allowsEarlyClosing(HalfOpenProgress $progress): bool
     {
-        return $progress->successes + $progress->failures >= $this->permittedCalls;
+        return $progress->outcomes >= $this->permittedCalls;
     }
 
     public function getMaxDuration(): float

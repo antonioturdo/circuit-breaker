@@ -6,9 +6,13 @@ namespace Zeusi\CircuitBreaker;
 
 use Zeusi\CircuitBreaker\Exception\InvalidArgumentException;
 use Zeusi\CircuitBreaker\HalfOpen\HalfOpenPolicyInterface;
+use Zeusi\CircuitBreaker\Opening\FailureOrSlowCallRateRule;
+use Zeusi\CircuitBreaker\Opening\FailureRateRule;
+use Zeusi\CircuitBreaker\Opening\OpeningRuleInterface;
+use Zeusi\CircuitBreaker\Opening\SlowCallRateRule;
 
 /**
- * Configuration of the failure rate strategy.
+ * Configuration of a circuit breaker.
  *
  * Durations are in seconds, with millisecond precision: 1 millisecond is the smallest positive duration.
  */
@@ -19,15 +23,13 @@ final class Configuration
 
     /**
      * @param float                   $timeWindow           seconds over which calls are counted, from 10 to 3600
-     * @param int                     $failureRateThreshold percentage of failed calls (1-100) that opens the circuit
-     * @param int                     $minimumRequests      calls required in the time window before the failure rate is evaluated
+     * @param list<OpeningRuleInterface> $openingRules         rules opening the circuit, at least one: the circuit opens when any of them requires it
      * @param float                   $openDuration         seconds the circuit stays open before becoming half-open, from 1 second to 30 days
      * @param HalfOpenPolicyInterface $halfOpenPolicy       how the half-open state tests the service, lasting at most from 1 second to 30 days
      */
     public function __construct(
         public readonly float $timeWindow,
-        public readonly int $failureRateThreshold,
-        public readonly int $minimumRequests,
+        public readonly array $openingRules,
         public readonly float $openDuration,
         public readonly HalfOpenPolicyInterface $halfOpenPolicy,
     ) {
@@ -42,12 +44,15 @@ final class Configuration
             throw new InvalidArgumentException(\sprintf('The time window must be at most 1 hour, %s seconds given', $timeWindow));
         }
 
-        if ($failureRateThreshold < 1 || $failureRateThreshold > 100) {
-            throw new InvalidArgumentException(\sprintf('The failure rate threshold must be between 1 and 100, %d given', $failureRateThreshold));
+        if ($openingRules === []) {
+            throw new InvalidArgumentException('At least one opening rule is required');
         }
 
-        if ($minimumRequests < 1) {
-            throw new InvalidArgumentException(\sprintf('The minimum requests must be at least 1, %d given', $minimumRequests));
+        foreach ($openingRules as $openingRule) {
+            // @phpstan-ignore instanceof.alwaysTrue (checked for applications without static analysis)
+            if (!$openingRule instanceof OpeningRuleInterface) {
+                throw new InvalidArgumentException(\sprintf('The opening rules must be %s, %s or %s instances, %s given', FailureRateRule::class, SlowCallRateRule::class, FailureOrSlowCallRateRule::class, get_debug_type($openingRule)));
+            }
         }
 
         // shorter open durations barely protect the service, and with a dead service they make the circuit cycle so

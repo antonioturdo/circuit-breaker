@@ -10,11 +10,9 @@ namespace Zeusi\CircuitBreaker\HalfOpen;
 final class HalfOpenProgress
 {
     /**
-     * @param int $successes successful outcomes registered
-     * @param int $failures  failed outcomes registered
+     * @param int $outcomes outcomes registered
      */
     public function __construct(
-        public readonly int $successes,
-        public readonly int $failures,
+        public readonly int $outcomes,
     ) {}
 }

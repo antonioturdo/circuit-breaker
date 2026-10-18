@@ -6,6 +6,8 @@ namespace Zeusi\CircuitBreaker;
 
 use Zeusi\CircuitBreaker\Clock\ClockInterface;
 use Zeusi\CircuitBreaker\Clock\SystemClock;
+use Zeusi\CircuitBreaker\Counting\DurationBands;
+use Zeusi\CircuitBreaker\Counting\OutcomeCounts;
 use Zeusi\CircuitBreaker\Event\CallRejected;
 use Zeusi\CircuitBreaker\Event\CircuitClosed;
 use Zeusi\CircuitBreaker\Event\CircuitHalfOpened;
@@ -13,14 +15,16 @@ use Zeusi\CircuitBreaker\Event\CircuitOpened;
 use Zeusi\CircuitBreaker\Event\EventInterface;
 use Zeusi\CircuitBreaker\Event\EventListenerInterface;
 use Zeusi\CircuitBreaker\Event\StorageFailed;
+use Zeusi\CircuitBreaker\Exception\InvalidArgumentException;
 use Zeusi\CircuitBreaker\Exception\LogicException;
 use Zeusi\CircuitBreaker\Exception\StorageException;
 use Zeusi\CircuitBreaker\HalfOpen\HalfOpenProgress;
 use Zeusi\CircuitBreaker\HalfOpen\PermissionRequest;
+use Zeusi\CircuitBreaker\Opening\OpeningCause;
+use Zeusi\CircuitBreaker\Opening\OpeningRuleInterface;
 use Zeusi\CircuitBreaker\Storage\CircuitState;
 use Zeusi\CircuitBreaker\Storage\KeyScheme;
 use Zeusi\CircuitBreaker\Storage\OutcomeCounter;
-use Zeusi\CircuitBreaker\Storage\OutcomeCounts;
 use Zeusi\CircuitBreaker\Storage\StorageInterface;
 
 /**
@@ -40,6 +44,8 @@ final class CircuitBreaker implements CircuitBreakerInterface
     private readonly int $openDuration;
     private readonly int $halfOpenMaxDuration;
 
+    private readonly DurationBands $durationBands;
+
     public function __construct(
         private readonly string $service,
         private readonly Configuration $configuration,
@@ -56,6 +62,11 @@ final class CircuitBreaker implements CircuitBreakerInterface
         $this->timeWindow = self::secondsToMilliseconds($configuration->timeWindow);
         $this->openDuration = self::secondsToMilliseconds($configuration->openDuration);
         $this->halfOpenMaxDuration = self::secondsToMilliseconds($configuration->halfOpenPolicy->getMaxDuration());
+        // outcomes are counted in the bands delimited by the duration thresholds of all the rules
+        $this->durationBands = new DurationBands(array_merge([], ...array_map(
+            static fn(OpeningRuleInterface $openingRule): array => $openingRule->getDurationThresholds(),
+            $configuration->openingRules,
+        )));
     }
 
     public function getService(): string
@@ -111,24 +122,29 @@ final class CircuitBreaker implements CircuitBreakerInterface
         return max(1, intdiv($milliseconds + 999, 1000));
     }
 
-    public function registerSuccess(): void
+    public function registerSuccess(?float $duration = null): void
     {
-        $this->registerOutcome(Outcome::Success);
+        self::assertValidDuration($duration);
+        $this->registerOutcome(Outcome::Success, $duration === null ? null : self::secondsToMilliseconds($duration));
     }
 
-    public function registerFailure(): void
+    public function registerFailure(?float $duration = null): void
     {
-        $this->registerOutcome(Outcome::Failure);
+        self::assertValidDuration($duration);
+        $this->registerOutcome(Outcome::Failure, $duration === null ? null : self::secondsToMilliseconds($duration));
     }
 
     public function getState(): State
     {
         $storedState = $this->loadStoredState();
 
-        return ($this->computeTargetStateDueToTime($storedState, $this->clock->getCurrentTime()) ?? $storedState)->state;
+        return ($this->computeTransitionDueToTime($storedState, $this->clock->getCurrentTime())->targetState ?? $storedState)->state;
     }
 
-    private function registerOutcome(Outcome $outcome): void
+    /**
+     * @param int|null $duration milliseconds the call took, null when unknown
+     */
+    private function registerOutcome(Outcome $outcome, ?int $duration): void
     {
         try {
             $now = $this->clock->getCurrentTime();
@@ -136,18 +152,18 @@ final class CircuitBreaker implements CircuitBreakerInterface
 
             // a single counter, bound to the period of the current state, records and counts
             $outcomeCounter = $this->createOutcomeCounter($currentState);
-            $outcomeCounter->recordOutcome($outcome, $now);
+            $outcomeCounter->recordOutcome($outcome, $duration, $now);
 
-            $targetState = match ($currentState->state) {
-                State::Closed => $this->computeTargetStateAfterOutcomeWhenClosed($outcomeCounter, $outcome, $now),
-                State::HalfOpen => $this->computeTargetStateAfterOutcomeWhenHalfOpen($outcomeCounter, $now),
+            $transition = match ($currentState->state) {
+                State::Closed => $this->computeTransitionAfterOutcomeWhenClosed($outcomeCounter, $outcome, $duration, $now),
+                State::HalfOpen => $this->computeTransitionAfterOutcomeWhenHalfOpen($outcomeCounter, $now),
                 // no call is permitted while open: the outcome belongs to a call permitted before opening, and is
                 // recorded in the open period, which nothing counts
                 State::Open => null,
             };
 
-            if ($targetState !== null) {
-                $this->tryStoreState($currentState, $targetState);
+            if ($transition !== null) {
+                $this->tryStoreState($currentState, $transition);
             }
         } catch (StorageException $exception) {
             $this->dispatchEvent(new StorageFailed($this->service, $exception));
@@ -157,50 +173,59 @@ final class CircuitBreaker implements CircuitBreakerInterface
     /**
      * Computes the transition of a closed circuit after an outcome.
      *
-     * A failure opens the circuit when the time window holds enough outcomes and the failure rate reaches the threshold.
+     * A failure or a slow call opens the circuit when an opening rule requires it. A fast success lowers every rate,
+     * so it cannot.
+     *
+     * @param int|null $duration milliseconds the call took, null when unknown
      *
      * @throws StorageException
      */
-    private function computeTargetStateAfterOutcomeWhenClosed(OutcomeCounter $outcomeCounter, Outcome $outcome, int $now): ?CircuitState
+    private function computeTransitionAfterOutcomeWhenClosed(OutcomeCounter $outcomeCounter, Outcome $outcome, ?int $duration, int $now): ?Transition
     {
-        if ($outcome === Outcome::Success) {
+        if ($outcome === Outcome::Success && !$this->isSlow($duration)) {
             return null;
         }
 
-        $windowCounts = $this->countWindowOutcomes($outcomeCounter, $now);
-        $hasEnoughOutcomes = $windowCounts->successes + $windowCounts->failures >= $this->configuration->minimumRequests;
+        $openingCause = $this->findOpeningCause($this->countWindowOutcomes($outcomeCounter, $now), State::Closed);
 
-        if (!$hasEnoughOutcomes) {
+        if ($openingCause === null) {
             return null;
         }
 
-        if (!$this->reachesFailureRateThreshold($windowCounts)) {
-            return null;
-        }
+        return Transition::createOpening($now, $openingCause);
+    }
 
-        return new CircuitState(State::Open, $now);
+    /**
+     * Checks whether a duration reaches a duration threshold of the rules.
+     *
+     * @param int|null $duration milliseconds the call took, null when unknown
+     */
+    private function isSlow(?int $duration): bool
+    {
+        // the first band with a duration starts from 0, the others from a threshold
+        return $this->durationBands->getBand($duration)->lowerBound > 0;
     }
 
     /**
      * Computes the transition of a half-open circuit after an outcome.
      *
-     * The circuit reopens as soon as its failure rate reaches the threshold, and closes early when the policy allows it
-     * with the failure rate below the threshold.
+     * The circuit reopens as soon as an opening rule requires it, and closes early when the policy allows it otherwise.
      *
      * @throws StorageException
      */
-    private function computeTargetStateAfterOutcomeWhenHalfOpen(OutcomeCounter $outcomeCounter, int $now): ?CircuitState
+    private function computeTransitionAfterOutcomeWhenHalfOpen(OutcomeCounter $outcomeCounter, int $now): ?Transition
     {
         $halfOpenCounts = $this->countWindowOutcomes($outcomeCounter, $now);
+        $openingCause = $this->findOpeningCause($halfOpenCounts, State::HalfOpen);
 
-        if ($this->reachesFailureRateThreshold($halfOpenCounts)) {
-            return new CircuitState(State::Open, $now);
+        if ($openingCause !== null) {
+            return Transition::createOpening($now, $openingCause);
         }
 
-        $halfOpenProgress = new HalfOpenProgress($halfOpenCounts->successes, $halfOpenCounts->failures);
+        $halfOpenProgress = new HalfOpenProgress($halfOpenCounts->getOutcomes());
 
         if ($this->configuration->halfOpenPolicy->allowsEarlyClosing($halfOpenProgress)) {
-            return new CircuitState(State::Closed, $now);
+            return Transition::createClosing($now);
         }
 
         return null;
@@ -216,14 +241,14 @@ final class CircuitBreaker implements CircuitBreakerInterface
     private function bringStateUpToDate(int $now): CircuitState
     {
         $storedState = $this->loadStoredState();
-        $targetState = $this->computeTargetStateDueToTime($storedState, $now);
+        $transition = $this->computeTransitionDueToTime($storedState, $now);
 
-        if ($targetState === null) {
+        if ($transition === null) {
             return $storedState;
         }
 
         // when another process changed the state first, go on with the state it stored
-        return $this->tryStoreState($storedState, $targetState) ? CircuitState::decode($targetState->encode()) : $this->loadStoredState();
+        return $this->tryStoreState($storedState, $transition) ? CircuitState::decode($transition->targetState->encode()) : $this->loadStoredState();
     }
 
     /**
@@ -233,41 +258,39 @@ final class CircuitBreaker implements CircuitBreakerInterface
      *
      * @throws StorageException
      */
-    private function computeTargetStateDueToTime(CircuitState $storedState, int $now): ?CircuitState
+    private function computeTransitionDueToTime(CircuitState $storedState, int $now): ?Transition
     {
         // the half-open state would already be over, with no outcome since nobody called: it is skipped
         if ($storedState->state === State::Open && $now >= $storedState->since + $this->openDuration + $this->halfOpenMaxDuration) {
-            return new CircuitState(State::Closed, $now);
+            return Transition::createClosing($now);
         }
 
         if ($storedState->state === State::Open && $now >= $storedState->since + $this->openDuration) {
-            return new CircuitState(State::HalfOpen, $storedState->since + $this->openDuration);
+            return Transition::createHalfOpening($storedState->since + $this->openDuration);
         }
 
         if ($storedState->state === State::HalfOpen && $now >= $storedState->since + $this->halfOpenMaxDuration) {
-            if ($this->reachesFailureRateThreshold($this->countWindowOutcomes($this->createOutcomeCounter($storedState), $now))) {
-                return new CircuitState(State::Open, $now);
-            }
+            $openingCause = $this->findOpeningCause($this->countWindowOutcomes($this->createOutcomeCounter($storedState), $now), State::HalfOpen);
 
-            return new CircuitState(State::Closed, $now);
+            return $openingCause === null ? Transition::createClosing($now) : Transition::createOpening($now, $openingCause);
         }
 
         return null;
     }
 
     /**
-     * Stores the target state if the stored state is still the given one, and emits the event of the transition.
+     * Stores the target state of the transition if the stored state is still the given one, and emits its event.
      *
      * @throws StorageException
      */
-    private function tryStoreState(CircuitState $storedState, CircuitState $targetState): bool
+    private function tryStoreState(CircuitState $storedState, Transition $transition): bool
     {
-        if (!$this->storage->compareAndSet($this->keyScheme->getStateKey(), $storedState->storedValue, $targetState->encode(), self::STATE_TTL)) {
+        if (!$this->storage->compareAndSet($this->keyScheme->getStateKey(), $storedState->storedValue, $transition->targetState->encode(), self::STATE_TTL)) {
             return false;
         }
 
-        $this->dispatchEvent(match ($targetState->state) {
-            State::Open => new CircuitOpened($this->service, $storedState->state),
+        $this->dispatchEvent(match ($transition->targetState->state) {
+            State::Open => new CircuitOpened($this->service, $storedState->state, $transition->getOpeningCause()),
             State::HalfOpen => new CircuitHalfOpened($this->service),
             State::Closed => new CircuitClosed($this->service),
         });
@@ -290,7 +313,7 @@ final class CircuitBreaker implements CircuitBreakerInterface
      */
     private function createOutcomeCounter(CircuitState $state): OutcomeCounter
     {
-        return new OutcomeCounter($this->storage, $this->keyScheme, $state, $this->timeWindow);
+        return new OutcomeCounter($this->storage, $this->keyScheme, $state, $this->timeWindow, $this->durationBands);
     }
 
     /**
@@ -306,11 +329,20 @@ final class CircuitBreaker implements CircuitBreakerInterface
         return $outcomeCounter->countOutcomes($now - $this->timeWindow, $now);
     }
 
-    private function reachesFailureRateThreshold(OutcomeCounts $counts): bool
+    /**
+     * Finds the first opening rule requiring the circuit to open, given the outcomes counted in the given state.
+     */
+    private function findOpeningCause(OutcomeCounts $counts, State $state): ?OpeningCause
     {
-        $total = $counts->successes + $counts->failures;
+        foreach ($this->configuration->openingRules as $openingRule) {
+            $openingCause = $openingRule->findOpeningCause($counts, $state);
 
-        return $total > 0 && $counts->failures * 100 >= $this->configuration->failureRateThreshold * $total;
+            if ($openingCause !== null) {
+                return $openingCause;
+            }
+        }
+
+        return null;
     }
 
     private function dispatchEvent(EventInterface $event): void
@@ -319,6 +351,16 @@ final class CircuitBreaker implements CircuitBreakerInterface
             $this->listener?->handleEvent($event);
         } catch (\Throwable) {
             // a failing listener never makes the protected call fail nor leaves a transition half done
+        }
+    }
+
+    /**
+     * @throws InvalidArgumentException if the duration is negative or not finite
+     */
+    private static function assertValidDuration(?float $duration): void
+    {
+        if ($duration !== null && (!is_finite($duration) || $duration < 0.0)) {
+            throw new InvalidArgumentException(\sprintf('The duration must be a finite number of seconds, at least 0, %s given', $duration));
         }
     }
 

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
+### Added
+
+- `SlowCallRateRule`: opens the circuit when the rate of calls taking at least
+  a given duration reaches a threshold, computed on the outcomes registered
+  with a duration.
+- `FailureOrSlowCallRateRule`: opens the circuit when the rate of calls that
+  failed or took at least a given duration reaches a threshold, computed on
+  all outcomes.
+- Optional duration of the call, in seconds, in `registerSuccess()` and
+  `registerFailure()`.
+
+### Changed
+
+- **BREAKING** — `Configuration` takes `openingRules`, a list of opening
+  rules (`FailureRateRule` among them), instead of `failureRateThreshold` and
+  `minimumRequests`. The circuit opens when any rule requires it.
+- **BREAKING** — `registerSuccess()` and `registerFailure()` of
+  `CircuitBreakerInterface` take an optional duration.
+- **BREAKING** — `CircuitOpened` carries the cause of the opening
+  (`openingCause`): the opening rule with the outcomes it matched and
+  evaluated.
+- **BREAKING** — `HalfOpenProgress` carries the number of half-open outcomes
+  (`outcomes`) instead of `successes` and `failures`.
+
 ## [0.1.0] - 2026-10-17
 
 ### Added
@@ -24,5 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permitted while the storage fails.
 - `ClockInterface` to control time in tests.
 
-[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/antonioturdo/circuit-breaker/releases/tag/0.1.0
