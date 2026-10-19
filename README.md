@@ -72,12 +72,113 @@ The circuit measures whether the service is alive. Register:
 
 A missing outcome is only a sample less: the circuit never waits for it.
 
-Both methods also accept the duration of the call in seconds, for example `registerSuccess(0.25)`, needed by the slow call rate rule.
+Both methods also accept the duration of the call in seconds, for example `registerSuccess(0.25)`, needed by the rules on slow calls. A `CallExecutor` measures it for you (see [Running calls](#running-calls)).
 
 ### Two settings to get right
 
 - **The client timeout must be shorter than `max_execution_time`.** A call killed by PHP registers no failure, so the circuit would never open.
 - **`openDuration` should be at least as long as the call timeout.** Calls started before the circuit opened can still fail afterwards: if they fail while the circuit is testing the service again, they make it look still broken.
+
+## Running calls
+
+Calling the circuit breaker around every request soon becomes repetitive: acquiring the permission, classifying the outcome, measuring the duration, handling a rejection. Better write it once in an abstraction hiding the mechanics of the breaker, such as a client of the service or a decorator of your HTTP client, so that the rest of the code calls the service as before. The library provides the pieces for it: a classifier of outcomes, shared by both kinds of calls, then a `CallExecutor` for synchronous calls and a `CallGate` for asynchronous ones.
+
+### Classifying outcomes
+
+The rules of [Registering outcomes](#registering-outcomes) depend on the client: which exceptions mean that the service did not answer, which ones that it answered with an error of the caller. An `OutcomeClassifierInterface` writes them once for each client or library:
+
+```php
+use Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
+use Zeusi\CircuitBreaker\Execution\OutcomeClassifierInterface;
+use Zeusi\CircuitBreaker\Outcome;
+
+final class HttpClientOutcomeClassifier implements OutcomeClassifierInterface
+{
+    public function classifyException(\Throwable $exception): ?Outcome
+    {
+        return match (true) {
+            $exception instanceof TransportExceptionInterface, // refused, timed out
+            $exception instanceof ServerExceptionInterface => Outcome::Failure, // 5xx
+            $exception instanceof ClientExceptionInterface, // 4xx: the service answered
+            $exception instanceof RedirectionExceptionInterface => Outcome::Success,
+            default => null, // nothing about the service: register nothing
+        };
+    }
+
+    public function classifyResult(mixed $result): ?Outcome
+    {
+        return Outcome::Success; // the errors are thrown when the response is read
+    }
+}
+```
+
+For a single kind of call, `CallbackOutcomeClassifier` takes the same decisions as closures, the one on results optional: `new CallbackOutcomeClassifier(fn (\Throwable $exception) => ..., fn (mixed $result) => ...)`.
+
+### Synchronous calls
+
+A `CallExecutor` acquires the permission, runs the call, measures its duration and registers its outcome. Whatever the outcome, the result of the call is returned and its exceptions are rethrown; when the circuit does not permit the call, it does not run and a `CallNotPermittedException` is thrown. A client of a payment service, for example:
+
+```php
+use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Zeusi\CircuitBreaker\CircuitBreakerInterface;
+use Zeusi\CircuitBreaker\Execution\CallExecutor;
+
+final class PaymentGateway
+{
+    private readonly CallExecutor $executor;
+
+    public function __construct(
+        private readonly HttpClientInterface $client,
+        CircuitBreakerInterface $breaker, // new CircuitBreaker('payments', ...)
+    ) {
+        $this->executor = new CallExecutor($breaker, new HttpClientOutcomeClassifier());
+    }
+
+    public function charge(Order $order): array
+    {
+        // the response is read within the call, so that the executor sees it complete
+        return $this->executor->execute(fn () => $this->client->request('POST', '/charges', ['json' => $order])->toArray());
+    }
+}
+```
+
+The rest of the code charges orders without knowing about the breaker, and handles the rejection where it handles the unavailability of the service:
+
+```php
+try {
+    $charge = $paymentGateway->charge($order);
+} catch (CallNotPermittedException) {
+    return ChargeResult::deferred(); // the circuit did not permit the call
+}
+```
+
+A decorator of a PSR-18 client works the same way, with a classifier of PSR-18 exceptions and responses: there 4xx and 5xx responses are returned, not thrown. Translating the rejection into an exception implementing `NetworkExceptionInterface` lets its callers handle an open circuit as any request that could not be completed.
+
+A call awaited inside a fiber (Amp, Revolt) completes within the executor too, and is synchronous for it.
+
+### Asynchronous calls
+
+Promises and lazy responses, such as those of Symfony HttpClient, complete after the executor would have returned. Admit the call through a `CallGate`, then register its outcome when it completes, with the duration known by the client, or `null` when unknown:
+
+```php
+use Zeusi\CircuitBreaker\Execution\CallGate;
+
+$gate = new CallGate($breaker, $classifier);
+
+$attempt = $gate->admit(); // throws CallNotPermittedException when the call is not permitted
+// start the call, then in whatever callback completes it:
+$attempt->registerResult($result, $duration);       // or
+$attempt->registerException($exception, $duration); // the duration known by the client, or null
+```
+
+This is the building block of integrations, such as a decorator of Symfony HttpClient built with its `AsyncDecoratorTrait` or a Guzzle middleware, which know when a call really completes and how long it took.
+
+An attempt registers only its first outcome, since asynchronous callbacks may report the same call more than once.
+
+The storages are synchronous: in an event loop, a Redis or Memcached round trip blocks every request in flight. With fibers, an adapter on an asynchronous client can implement `StorageInterface` and await inside its methods.
 
 ## How it works
 
