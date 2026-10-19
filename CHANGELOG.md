@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
+### Added
+
+- `CallExecutor`: runs a call through a circuit breaker, registering its
+  outcome and duration; `CallNotPermittedException` when the circuit does not
+  permit the call.
+- `CallGate`: admits calls and hands out a `CallAttempt` registering the
+  outcome later, for asynchronous calls and integrations.
+- `OutcomeClassifierInterface`: classifies the exceptions and results of the
+  calls made with a client or a library; `CallbackOutcomeClassifier` for
+  single calls.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added
@@ -50,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permitted while the storage fails.
 - `ClockInterface` to control time in tests.
 
-[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/antonioturdo/circuit-breaker/releases/tag/0.1.0
