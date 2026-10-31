@@ -5,56 +5,51 @@ declare(strict_types=1);
 namespace Zeusi\CircuitBreaker\Execution;
 
 use Zeusi\CircuitBreaker\CircuitBreakerInterface;
+use Zeusi\CircuitBreaker\Exception\CallNotPermittedException;
 use Zeusi\CircuitBreaker\Exception\InvalidArgumentException;
 use Zeusi\CircuitBreaker\Outcome;
 
 /**
- * A call admitted by a CallGate, registering its outcome once.
+ * A call admitted through a circuit breaker, registering its outcome once.
  *
- * The duration comes from whoever made the call: a client usually knows it (the total time of an HTTP response),
- * without the waits on the caller side such as a queue of the client. Only the first registration counts: asynchronous
- * callbacks may report the same call more than once.
+ * The building block for asynchronous calls and integrations: the outcome can be registered from whatever callback
+ * completes the call (a promise, a stream loop, a client decorator), known directly or given by an
+ * OutcomeClassifierInterface. The duration comes from whoever made the call: a client usually knows it (the total time
+ * of an HTTP response), without the waits on the caller side such as a queue of the client. Only the first registration
+ * counts: asynchronous callbacks may report the same call more than once. Synchronous calls are simpler with
+ * CallExecutor.
  */
 final class CallAttempt
 {
     private bool $isRegistered = false;
 
-    /**
-     * @internal created by CallGate::admit()
-     */
-    public function __construct(
+    private function __construct(
         private readonly CircuitBreakerInterface $circuitBreaker,
-        private readonly OutcomeClassifierInterface $outcomeClassifier,
     ) {}
 
     /**
-     * Registers the outcome of a call that returned, as classified.
+     * Admits a call when the circuit permits it.
      *
-     * @param float|null $duration seconds the call took, null when unknown: an unknown duration is neither slow nor fast
-     *
-     * @throws InvalidArgumentException if the duration is negative or not finite
+     * @throws CallNotPermittedException when the circuit does not permit the call, which must then not be made
      */
-    public function registerResult(mixed $result, ?float $duration): void
+    public static function admit(CircuitBreakerInterface $circuitBreaker): self
     {
-        $this->registerOutcome($this->outcomeClassifier->classifyResult($result), $duration);
+        if (!$circuitBreaker->acquirePermission()) {
+            throw new CallNotPermittedException($circuitBreaker->getService());
+        }
+
+        return new self($circuitBreaker);
     }
 
     /**
-     * Registers the outcome of a call that threw, as classified.
+     * Registers the outcome of the call, unless one was already registered.
      *
-     * @param float|null $duration seconds the call took, null when unknown: an unknown duration is neither slow nor fast
+     * @param Outcome|null $outcome  null to register nothing, when the call says nothing about the service
+     * @param float|null   $duration seconds the call took, null when unknown: an unknown duration is neither slow nor fast
      *
      * @throws InvalidArgumentException if the duration is negative or not finite
      */
-    public function registerException(\Throwable $exception, ?float $duration): void
-    {
-        $this->registerOutcome($this->outcomeClassifier->classifyException($exception), $duration);
-    }
-
-    /**
-     * @param Outcome|null $outcome null to register nothing
-     */
-    private function registerOutcome(?Outcome $outcome, ?float $duration): void
+    public function register(?Outcome $outcome, ?float $duration): void
     {
         if ($this->isRegistered) {
             return;

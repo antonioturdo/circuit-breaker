@@ -79,7 +79,7 @@ Both methods also accept the duration of the call in seconds, for example `regis
 
 ## Running calls
 
-Calling the breaker around every request soon becomes repetitive: write it once, in an abstraction hiding its mechanics, such as a client of the service or a decorator of your HTTP client, so that the rest of the code calls the service as before. The library provides the pieces: a classifier of outcomes, a `CallExecutor` for synchronous calls and a `CallGate` for asynchronous ones.
+Calling the breaker around every request soon becomes repetitive: write it once, in an abstraction hiding its mechanics, such as a client of the service or a decorator of your HTTP client, so that the rest of the code calls the service as before. The library provides the pieces: a classifier of outcomes, a `CallExecutor` for synchronous calls and a `CallAttempt` for asynchronous ones.
 
 ### Classifying outcomes
 
@@ -155,17 +155,16 @@ try {
 
 ### Asynchronous calls
 
-Promises and lazy responses, such as those of Symfony HttpClient, complete after the executor would have returned, unlike calls awaited in a fiber (Amp, Revolt). Admit the call through a `CallGate`, then register its outcome when it completes, with the duration known by the client, or `null` when unknown:
+Promises and lazy responses, such as those of Symfony HttpClient, complete after the executor would have returned, unlike calls awaited in a fiber (Amp, Revolt). Admit the call as a `CallAttempt`, then register its outcome when it completes, with the duration known by the client, or `null` when unknown:
 
 ```php
-use Zeusi\CircuitBreaker\Execution\CallGate;
+use Zeusi\CircuitBreaker\Execution\CallAttempt;
+use Zeusi\CircuitBreaker\Outcome;
 
-$gate = new CallGate($breaker, $classifier);
-
-$attempt = $gate->admit(); // throws CallNotPermittedException when the call is not permitted
+$attempt = CallAttempt::admit($breaker); // throws CallNotPermittedException when the call is not permitted
 // start the call, then in whatever callback completes it:
-$attempt->registerResult($result, $duration);       // or
-$attempt->registerException($exception, $duration); // the duration known by the client, or null
+$attempt->register(Outcome::Failure, $duration);                           // an outcome known directly, or
+$attempt->register($classifier->classifyException($exception), $duration); // given by a classifier
 ```
 
 The storages are synchronous: in an event loop, a Redis or Memcached round trip blocks every request in flight. With fibers, an adapter on an asynchronous client can implement `StorageInterface` and await inside its methods.
