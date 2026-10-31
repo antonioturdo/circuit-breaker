@@ -192,8 +192,8 @@ The time window slides: the rates always cover the last `timeWindow` seconds.
 |---|---|---|
 | `timeWindow` | seconds | 10 to 3600 |
 | `openingRules` | | at least one |
-| `openDuration` | seconds | 1 to 30 days |
-| `halfOpenPolicy` | | maximum duration from 1 second to 30 days |
+| `openDuration` | seconds | 1 to 3600 |
+| `halfOpenPolicy` | | maximum duration from 1 to 3600 seconds |
 
 Durations are in seconds, as floats with millisecond precision: `0.25` is 250 milliseconds. Every parameter is required.
 

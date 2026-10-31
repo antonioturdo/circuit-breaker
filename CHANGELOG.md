@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through a circuit breaker, and the attempt registers an outcome with
   `register()`, known directly or given by a classifier, instead of
   `registerResult()` and `registerException()`.
+- **BREAKING** — `Configuration` limits `openDuration` and the maximum duration
+  of the half-open policy to 1 hour, instead of 30 days.
 
 ## [0.3.0] - 2026-10-19
 
