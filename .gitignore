@@ -17,3 +17,4 @@ docker-compose.yml
 # internals
 docs/internals
 AGENTS.md
+benchmarks

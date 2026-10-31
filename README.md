@@ -9,12 +9,11 @@
 
 > A circuit breaker for PHP with combinable opening rules on failed and slow calls, configurable half-open policies, and state shared through APCu, Redis or Memcached.
 
-When a service your application depends on stops answering, or answers slowly, every call to it holds a PHP worker until it times out or completes, and the workers pile up until the application itself stops answering. A circuit breaker notices the failures or the slowness and, for a while, tells your code not to call that service: your code falls back instead, your workers stay free and the service gets time to recover.
+When a service stops answering, or answers slowly, every call to it holds a PHP worker, until the application itself stops answering. A circuit breaker notices it and, for a while, tells your code to fall back instead of calling the service.
 
-- **Combinable opening rules** over a sliding time window: failure rate, slow call rate, or failed and slow calls together, each with its own threshold and minimum number of calls. The circuit opens when any rule requires it, so it reacts to a service that slows down, not only to one that fails.
-- **Configurable recovery**: after an outage, a half-open policy decides how the service is tested. Besides the classic single trial, a ramp brings the calls back gradually instead of all at once, so a single lucky success is not enough to close the circuit.
-- **Shared state** with atomic operations, safe under concurrent PHP-FPM workers and across servers.
-- **Storage failures**: if the storage fails, calls are permitted and an event tells you.
+- **Combinable opening rules** over a sliding time window: failure rate, slow call rate, or both together, each with its own threshold.
+- **Configurable recovery**: the service is tested with a number of trial calls, from the classic single one up, or with a ramp bringing the calls back gradually, so that one lucky success need not close the circuit.
+- **Shared state** in APCu, Redis or Memcached, or in your own storage implementing three atomic primitives, safe under concurrent PHP-FPM workers and across servers. If the storage fails, calls are permitted and an event tells you.
 
 ## Installation
 
@@ -60,17 +59,16 @@ try {
 $breaker->registerSuccess();
 ```
 
-A circuit breaker protects one service, identified by its name. It holds no state of its own, so creating one per call, or per host discovered at runtime, costs nothing.
+A circuit breaker protects one service, identified by its name. Its state lives in the storage, under that name: instances with the same name share the circuit.
 
 ### Registering outcomes
 
 The circuit measures whether the service is alive. Register:
 
 - **a success** when the service answered, even with an application error unrelated to its health: not found, invalid data, access denied;
-- **a failure** when it did not answer, or answered with an error of its own: timeout, connection refused, 5xx;
-- **nothing** when the call never left, for example because building the request failed.
+- **a failure** when it did not answer, or answered with an error of its own: timeout, connection refused, 5xx.
 
-A missing outcome is only a sample less: the circuit never waits for it.
+Register nothing when the call says nothing about the service, for example because building the request failed: a missing outcome is only a sample less.
 
 Both methods also accept the duration of the call in seconds, for example `registerSuccess(0.25)`, needed by the rules on slow calls. A `CallExecutor` measures it for you (see [Running calls](#running-calls)).
 
@@ -81,7 +79,7 @@ Both methods also accept the duration of the call in seconds, for example `regis
 
 ## Running calls
 
-Calling the circuit breaker around every request soon becomes repetitive: acquiring the permission, classifying the outcome, measuring the duration, handling a rejection. Better write it once in an abstraction hiding the mechanics of the breaker, such as a client of the service or a decorator of your HTTP client, so that the rest of the code calls the service as before. The library provides the pieces for it: a classifier of outcomes, shared by both kinds of calls, then a `CallExecutor` for synchronous calls and a `CallGate` for asynchronous ones.
+Calling the breaker around every request soon becomes repetitive: write it once, in an abstraction hiding its mechanics, such as a client of the service or a decorator of your HTTP client, so that the rest of the code calls the service as before. The library provides the pieces: a classifier of outcomes, a `CallExecutor` for synchronous calls and a `CallGate` for asynchronous ones.
 
 ### Classifying outcomes
 
@@ -115,7 +113,7 @@ final class HttpClientOutcomeClassifier implements OutcomeClassifierInterface
 }
 ```
 
-For a single kind of call, `CallbackOutcomeClassifier` takes the same decisions as closures, the one on results optional: `new CallbackOutcomeClassifier(fn (\Throwable $exception) => ..., fn (mixed $result) => ...)`.
+When a class is too much, for example for a single kind of call, `CallbackOutcomeClassifier` takes the two methods as closures: `new CallbackOutcomeClassifier($classifyException, $classifyResult)`, where every result is a success when the second one is omitted.
 
 ### Synchronous calls
 
@@ -155,13 +153,9 @@ try {
 }
 ```
 
-A decorator of a PSR-18 client works the same way, with a classifier of PSR-18 exceptions and responses: there 4xx and 5xx responses are returned, not thrown. Translating the rejection into an exception implementing `NetworkExceptionInterface` lets its callers handle an open circuit as any request that could not be completed.
-
-A call awaited inside a fiber (Amp, Revolt) completes within the executor too, and is synchronous for it.
-
 ### Asynchronous calls
 
-Promises and lazy responses, such as those of Symfony HttpClient, complete after the executor would have returned. Admit the call through a `CallGate`, then register its outcome when it completes, with the duration known by the client, or `null` when unknown:
+Promises and lazy responses, such as those of Symfony HttpClient, complete after the executor would have returned, unlike calls awaited in a fiber (Amp, Revolt). Admit the call through a `CallGate`, then register its outcome when it completes, with the duration known by the client, or `null` when unknown:
 
 ```php
 use Zeusi\CircuitBreaker\Execution\CallGate;
@@ -174,30 +168,24 @@ $attempt->registerResult($result, $duration);       // or
 $attempt->registerException($exception, $duration); // the duration known by the client, or null
 ```
 
-This is the building block of integrations, such as a decorator of Symfony HttpClient built with its `AsyncDecoratorTrait` or a Guzzle middleware, which know when a call really completes and how long it took.
-
-An attempt registers only its first outcome, since asynchronous callbacks may report the same call more than once.
-
 The storages are synchronous: in an event loop, a Redis or Memcached round trip blocks every request in flight. With fibers, an adapter on an asynchronous client can implement `StorageInterface` and await inside its methods.
 
 ## How it works
 
 - **Closed**: every call is permitted. When an outcome brings the rate of an opening rule (failed calls, or slow calls) to its threshold or above, with at least its `minimumRequests` outcomes in the time window, the circuit opens.
 - **Open**: no call is permitted for `openDuration`.
-- **Half-open**: the circuit tests the service with part of the calls, as decided by the half-open policy. As soon as the rate of an opening rule over the half-open outcomes within the time window reaches its threshold, the circuit opens again; this state does not wait for `minimumRequests`. Otherwise it closes when the policy says enough has been observed, or at the latest after the policy's maximum duration.
+- **Half-open**: the circuit tests the service with part of the calls, as decided by the half-open policy. As soon as an opening rule reaches its threshold over the half-open outcomes in the time window, without waiting for `minimumRequests`, the circuit opens again. Otherwise it closes when the policy allows it: at the end of a ramp, or once the permitted calls have all reported back, at the latest after the maximum duration.
 
-There is no background process: a transition due to time happens on the first call that finds it due, and its event is emitted then. After a long period without calls, the circuit skips the half-open state and closes: no traffic reached the service in the meantime.
-
-`getState()` returns the state the next call would find, without changing anything.
+There is no background process: a transition due to time happens on the first call that finds it due, and its event is emitted then. After a long period without calls, the circuit skips the half-open state and closes, as a half-open state without calls would at the end of its maximum duration. The `getState()` method returns the state the next call would find, without executing any transition.
 
 ### How outcomes are counted
 
-The time window slides: the failure rate always covers the last `timeWindow` seconds. Unlike consecutive fixed windows, a burst of failures across the boundary of two intervals is not split in half.
+The time window slides: the rates always cover the last `timeWindow` seconds.
 
-- The window is split into buckets of at least 1 second, at most 60: a 30 second window has 30 buckets of 1 second, a 10 minute window 60 buckets of 10 seconds. Every outcome is a single atomic increment, of the key of its bucket, outcome and duration band, so concurrent workers never lose one.
-- A count covers the buckets spanning the window, so it is precise within one bucket: 1 second for windows up to a minute, 1/60 of the window beyond. With fewer than 10 buckets the count would approach a fixed window, hence the minimum of 10 seconds.
+- The window is split into at most 60 buckets of at least 1 second: a 30 second window has 30 buckets of 1 second, a 10 minute window 60 buckets of 10 seconds. Every outcome is a single atomic increment of the key of its bucket, outcome and duration band, so concurrent workers never lose one.
+- A count covers the buckets spanning the window, so its start is precise within the duration of one bucket: 1 second for windows up to a minute, 1/60 of the window beyond.
 - Every state counts only its own outcomes: the half-open state is never influenced by the failures that opened the circuit, and the closed state starts afresh after it. Nothing is ever deleted: older keys expire by themselves.
-- An active service takes at most about 120 short keys (one per bucket for successes and for failures), a few tens of kilobytes, whatever its traffic. Rules on slow calls split them by duration: with one slow call duration, at most about 360.
+- An active service takes at most about 120 short keys (one per bucket for successes and for failures), a few tens of kilobytes, whatever its traffic and its rules on failures. Rules on slow calls split the keys into duration bands: at most about 360 keys with one slow call duration, 120 more for every other distinct one, rules with the same duration sharing their bands. Every outcome is still a single increment, while every count reads the keys of all bands.
 
 ### Configuration
 
@@ -208,65 +196,46 @@ The time window slides: the failure rate always covers the last `timeWindow` sec
 | `openDuration` | seconds | 1 to 30 days |
 | `halfOpenPolicy` | | maximum duration from 1 second to 30 days |
 
-Durations are floats, with millisecond precision. Every parameter is required.
+Durations are in seconds, as floats with millisecond precision: `0.25` is 250 milliseconds. Every parameter is required.
 
 ### Opening rules
 
-The circuit opens when any opening rule requires it, so failures and slowness can have thresholds of their own:
+The circuit opens when any opening rule requires it, so failed calls, slow calls, or both counted together can have thresholds of their own:
 
 ```php
 use Zeusi\CircuitBreaker\Opening\SlowCallRateRule;
 
 openingRules: [
+    // opens when 50% of the calls fail
     new FailureRateRule(threshold: 50, minimumRequests: 10),
     // opens when 80% of the calls take 2 seconds or more
     new SlowCallRateRule(slowCallDuration: 2.0, threshold: 80, minimumRequests: 10),
 ],
 ```
 
-| Rule | Parameter | Unit | Limits |
-|---|---|---|---|
-| `FailureRateRule` | `threshold` | percentage of failed calls | 1 to 100 |
-| | `minimumRequests` | calls in the time window | at least 1 |
-| `SlowCallRateRule` | `slowCallDuration` | seconds from which a call is slow | at least 0.001 |
-| | `threshold` | percentage of slow calls | 1 to 100 |
-| | `minimumRequests` | calls with a duration in the time window | at least 1 |
-| `FailureOrSlowCallRateRule` | `slowCallDuration` | seconds from which a call is slow | at least 0.001 |
-| | `threshold` | percentage of failed or slow calls | 1 to 100 |
-| | `minimumRequests` | calls in the time window | at least 1 |
+Every rule opens the circuit when the rate it computes reaches its `threshold`, a percentage from 1 to 100, over at least `minimumRequests` outcomes. The rules on slow calls also take a `slowCallDuration`, in seconds, from which a call is slow.
 
-A slow call is counted whether it succeeded or failed: a timeout counts for both rules. The slow call rate is computed on the outcomes registered with a duration, so calls registered without one neither raise nor dilute it. Durations are counted only when a rule needs them, in bands delimited by the slow call durations: every outcome is still a single storage increment, and each slow call duration adds a few keys to read.
+- **`FailureRateRule`**: failed calls over all outcomes.
+- **`SlowCallRateRule`**: slow calls, succeeded or failed, over the outcomes registered with a duration: calls registered without one count neither in the rate nor towards `minimumRequests`.
+- **`FailureOrSlowCallRateRule`**: failed or slow calls over all outcomes, for runtimes such as PHP-FPM where a slow call holds a worker as long as a failed one.
 
-A slow service holds PHP-FPM workers as long as a dead one: with PHP-FPM, a call that failed or was slow costs the same, and `FailureOrSlowCallRateRule` counts them together, a slow failure once, over all outcomes. It can sit next to a rule on failures only, with a lower threshold for errors:
-
-```php
-use Zeusi\CircuitBreaker\Opening\FailureOrSlowCallRateRule;
-
-openingRules: [
-    new FailureRateRule(threshold: 50, minimumRequests: 10),
-    // opens when 70% of the calls failed or took 2 seconds or more
-    new FailureOrSlowCallRateRule(slowCallDuration: 2.0, threshold: 70, minimumRequests: 10),
-],
-```
-
-In asynchronous runtimes, where a slow call does not hold a worker, `SlowCallRateRule` with a threshold of its own opens only when the service is clearly degraded.
+A failed call reaching the slow call duration, such as a timeout, counts both as a failure and as a slow call. Durations are counted only when a rule needs them, at the cost of [more keys](#how-outcomes-are-counted).
 
 ### Half-open policies
+
+The half-open policy decides which calls test the service and when the circuit closes, unless an opening rule opens it again first. There are two: a ramp, or a number of permitted calls.
 
 A **ramp** permits a growing ratio of calls during its duration, then closes the circuit. It tests the service on real traffic and protects it from getting the full load at once:
 
 ```php
-RampPolicy::createExponential(duration: 60, initialRatio: 0.01); // 1%, doubling at regular intervals
-RampPolicy::createLinear(duration: 60, initialRatio: 0.01);      // 1%, growing at a constant pace
-```
-
-The exponential ramp spends more time on low ratios: half way through, 10% of the calls are permitted, against about 50% for the linear one. The initial ratio is relative to your traffic: on a busy service, 1% may already be many calls.
-
-The linear ramp is a power curve with exponent 1. A greater exponent starts more slowly, a lower one faster:
-
-```php
+RampPolicy::createExponential(duration: 60, initialRatio: 0.01);       // 10% of the calls half way
 RampPolicy::createPower(duration: 60, initialRatio: 0.01, exponent: 2); // about 26% half way
+RampPolicy::createLinear(duration: 60, initialRatio: 0.01);            // about 50% half way
 ```
+
+All three start from 1% of the calls: the exponential ramp spends more time on low ratios, a power curve starts more slowly the greater its exponent. The initial ratio is relative to your traffic: on a busy service, 1% may already be many calls.
+
+You can also implement other curves with `RampCurveInterface`, mapping the progress of the ramp (0 to 1) to the ratio of calls permitted, and pass them to `new RampPolicy(duration: 60, curve: $curve)`.
 
 **Permitted calls** permit the first calls of the half-open state and close the circuit once they all reported back, or at the latest after the maximum duration:
 
@@ -275,24 +244,6 @@ use Zeusi\CircuitBreaker\HalfOpen\PermittedCallsPolicy;
 
 PermittedCallsPolicy::createSingleTrial(maxDuration: 30);     // the classic single trial
 new PermittedCallsPolicy(maxDuration: 30, permittedCalls: 5); // the first 5 calls
-```
-
-A single successful trial closes the circuit even for a service that succeeds only now and then, and sends it the full traffic: the ramp is usually the safer choice.
-
-A ramp can follow any curve, mapping its progress (0 to 1) to the ratio of calls permitted:
-
-```php
-use Zeusi\CircuitBreaker\HalfOpen\RampCurveInterface;
-
-final class SteppedRampCurve implements RampCurveInterface
-{
-    public function computeAdmissionRatio(float $progress): float
-    {
-        return $progress < 0.5 ? 0.1 : 0.5; // 10%, then 50% from half way
-    }
-}
-
-new RampPolicy(duration: 60, curve: new SteppedRampCurve());
 ```
 
 ## Storages
@@ -308,9 +259,7 @@ The shared storages accept a prefix, to separate applications sharing the same b
 
 ### APCu
 
-APCu memory belongs to a single PHP master process, so every server, every PHP-FPM pool and every CLI command has its own circuits, opened by the failures it sees. When circuits must be shared across servers, use Redis or Memcached.
-
-APCu has no background cleanup: an expired entry is removed when another entry is inserted in the same slot of its hash table. Since buckets are inserted continuously, the number of entries grows for a while, then stays around the live entries plus the number of slots (about four times `apc.entries_hint`, 4096 by default). This is expected and bounded. With many services, raise `apc.entries_hint` to keep lookups fast. If the rest of the application fills the cache, APCu before 5.1.25 with `apc.ttl=0` clears it entirely, and every circuit restarts closed.
+APCu has no background cleanup: expired entries linger until their slot is reused, so the number of entries grows for a while, then levels off. With many services, you may need to raise `apc.entries_hint` and `apc.shm_size`: when the cache fills up, APCu before 5.1.25 with the default `apc.ttl=0` clears it entirely, and every circuit restarts closed.
 
 ### Redis
 
@@ -370,13 +319,9 @@ $breaker = new CircuitBreaker('payments', $configuration, $storage, new CircuitL
 | `CircuitHalfOpened` | the circuit started testing the service |
 | `CircuitClosed` | the circuit closed |
 | `CallRejected` | a call was not permitted (`state`: open or half-open) |
-| `StorageFailed` | the storage failed and the call went through (`exception`) |
+| `StorageFailed` | the storage failed: the call was permitted or its outcome dropped (`exception`) |
 
-`CallRejected` is emitted for every rejected call: count it in a metric rather than logging it. Transitions are emitted once, even with many concurrent workers. Exceptions thrown by the listener are caught and ignored, so a failing listener never breaks the call it observes.
-
-### When the storage fails
-
-Calls are permitted, outcomes are dropped, and a `StorageFailed` event is emitted. The circuit does not protect the service until the storage recovers, so watch that event. `getState()`, meant for diagnostics, throws the storage exception instead.
+`CallRejected` is emitted for every rejected call: count it in a metric rather than logging it. Transitions are emitted once, even with many concurrent workers. Exceptions thrown by the listener are caught and ignored, so a failing listener never breaks the call it observes. Watch `StorageFailed`: until the storage recovers, every call is permitted and the circuit protects nothing. `getState()`, meant for diagnostics, throws the storage exception instead.
 
 ## Testing
 
