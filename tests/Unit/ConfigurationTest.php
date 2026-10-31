@@ -26,7 +26,7 @@ final class ConfigurationTest extends TestCase
         yield 'no opening rule' => [60, [], 10];
         yield 'opening rule of another type' => [60, [...$openingRules, 50], 10];
         yield 'open duration below 1 second' => [60, $openingRules, 0.999];
-        yield 'open duration above 30 days' => [60, $openingRules, 2_592_000.001];
+        yield 'open duration above 1 hour' => [60, $openingRules, 3600.001];
     }
 
     /**
@@ -46,7 +46,7 @@ final class ConfigurationTest extends TestCase
     public static function invalidHalfOpenMaxDurationProvider(): iterable
     {
         yield 'below 1 second' => [0.999];
-        yield 'above 30 days' => [2_592_000.001];
+        yield 'above 1 hour' => [3600.001];
     }
 
     #[DataProvider('invalidHalfOpenMaxDurationProvider')]
