@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-31
+
 ### Changed
 
 - **BREAKING** — `CallGate` is removed: `CallAttempt::admit()` admits a call
@@ -72,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permitted while the storage fails.
 - `ClockInterface` to control time in tests.
 
-[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/antonioturdo/circuit-breaker/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.3.0...0.4.0
 [0.3.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.2.0...0.3.0
 [0.2.0]: https://github.com/antonioturdo/circuit-breaker/compare/0.1.0...0.2.0
 [0.1.0]: https://github.com/antonioturdo/circuit-breaker/releases/tag/0.1.0
