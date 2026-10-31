@@ -12,16 +12,14 @@ use Zeusi\CircuitBreaker\Exception\CallNotPermittedException;
  *
  * Running the whole call, it measures its duration. The outcome is registered when the call returns or throws, so the
  * call must complete within it: a synchronous call, or an asynchronous one awaited inside a fiber (Amp, Revolt). For a
- * call returning a promise or a lazy response, use CallGate and register the outcome when the call completes.
+ * call returning a promise or a lazy response, use CallAttempt and register the outcome when the call completes.
  */
 final class CallExecutor
 {
-    private readonly CallGate $callGate;
-
-    public function __construct(CircuitBreakerInterface $circuitBreaker, OutcomeClassifierInterface $outcomeClassifier)
-    {
-        $this->callGate = new CallGate($circuitBreaker, $outcomeClassifier);
-    }
+    public function __construct(
+        private readonly CircuitBreakerInterface $circuitBreaker,
+        private readonly OutcomeClassifierInterface $outcomeClassifier,
+    ) {}
 
     /**
      * Runs the call when the circuit permits it.
@@ -36,19 +34,22 @@ final class CallExecutor
      */
     public function execute(callable $call): mixed
     {
-        $attempt = $this->callGate->admit();
+        $attempt = CallAttempt::admit($this->circuitBreaker);
         $startTime = hrtime(true);
 
         try {
             $result = $call();
         } catch (\Throwable $exception) {
-            $attempt->registerException($exception, self::getSecondsSince($startTime));
+            // measured before classifying, which is not part of the call
+            $duration = self::getSecondsSince($startTime);
+            $attempt->register($this->outcomeClassifier->classifyException($exception), $duration);
 
             throw $exception;
         }
 
+        $duration = self::getSecondsSince($startTime);
         // a result classified as a failure is still returned: the caller handles it as before
-        $attempt->registerResult($result, self::getSecondsSince($startTime));
+        $attempt->register($this->outcomeClassifier->classifyResult($result), $duration);
 
         return $result;
     }

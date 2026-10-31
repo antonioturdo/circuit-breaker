@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING** — `CallGate` is removed: `CallAttempt::admit()` admits a call
+  through a circuit breaker, and the attempt registers an outcome with
+  `register()`, known directly or given by a classifier, instead of
+  `registerResult()` and `registerException()`.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added
